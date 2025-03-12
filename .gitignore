@@ -1,0 +1,12 @@
+# .gitignore
+
+
+*~
+*#
+.#*
+*rej
+*orig
+pinentry*
+*.hi
+*.o
+*.a
