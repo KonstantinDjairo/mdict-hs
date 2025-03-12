@@ -13,3 +13,12 @@ ghc -O2 -Wall -fno-warn-unused-imports \
     -L./lib \
     MDict.hs
 ```    
+
+
+### running the cli 
+we do provide a example of how to use this library, as a cli
+
+```shell
+ ghc -L./lib -lmdict -lminiz -lstdc++ Main.hs -o my_program
+ ```
+ the command above assumes that the lib folder contain the *.a files mentioned before, and that you also already compiled the haskell library itself and that this Main.hs file is placed in the same folder as the compiled library.
