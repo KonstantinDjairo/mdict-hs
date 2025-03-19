@@ -19,8 +19,8 @@ import Foreign.ForeignPtr (ForeignPtr, newForeignPtr, withForeignPtr)
 import Control.Exception (bracket, throwIO)
 import Control.Monad (when)
 import qualified Data.ByteString as BS
-import Data.Text.Encoding (decodeUtf8')
-import Data.Text (Text, unpack)
+import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Char8 as BSC
 import Data.List (intercalate)
 
 -- C-compatible struct representation
@@ -49,6 +49,8 @@ data MDictType = MDX | MDD deriving (Show, Eq, Enum)
 foreign import ccall "mdict_init"
   c_mdict_init :: CString -> IO (Ptr ())
 
+
+-- we need to use it somewhere, to clean memory
 foreign import ccall "mdict_destory"
   c_mdict_destroy :: Ptr () -> IO ()
 
@@ -78,13 +80,13 @@ withMDict path action =
       (do rawPtr <- c_mdict_init cpath
           when (rawPtr == nullPtr) $ 
             throwIO (userError "Failed to initialize MDict")
-          fp <- newForeignPtr c_mdict_destroy_finalizer rawPtr  -- Correct finalizer
+          fp <- newForeignPtr c_mdict_destroy_finalizer rawPtr
           return (MDict fp))
       (\_ -> return ())
       action
 
--- Dictionary lookup with error handling
-lookupWord :: MDict -> String -> IO (Either String String)
+-- Dictionary lookup with raw bytes
+lookupWord :: MDict -> String -> IO (Either String BS.ByteString)
 lookupWord (MDict fptr) word = 
   withForeignPtr fptr $ \ptr ->
     withCString word $ \cword ->
@@ -94,22 +96,15 @@ lookupWord (MDict fptr) word =
         if result == nullPtr
           then return $ Left "Word not found"
           else do
-            content <- peekUtf8CString result
-            return $ Right content
+            len <- c_strlen result
+            bs <- BSI.create (fromIntegral len) $ \p -> 
+              BSI.memcpy p (castPtr result) (fromIntegral len)
+            return $ Right bs
 
--- only seem to work with MDD
-listAllKeys :: MDict -> IO String
-listAllKeys dict = do
-  result <- getKeys dict
-  case result of
-    Left err -> return $ "Error: " ++ err
-    Right keys -> return $ formatKeys keys
-  where
-    formatKeys :: [(String, CULong)] -> String
-    formatKeys = unlines . map (\(k, o) -> k ++ " (" ++ show o ++ ")")
+-- Key list handling
+type KeyEntry = (BS.ByteString, CULong)
 
--- Key list retrieval with proper cleanup
-getKeys :: MDict -> IO (Either String [(String, CULong)])
+getKeys :: MDict -> IO (Either String [KeyEntry])
 getKeys (MDict fptr) = 
   withForeignPtr fptr $ \ptr ->
     alloca $ \lenPtr -> do
@@ -120,19 +115,24 @@ getKeys (MDict fptr) =
         else do
           keyPtrs <- peekArray (fromIntegral len) arrPtr
           items <- mapM (handleKeyItem arrPtr len) keyPtrs
-          c_free_simple_key_list arrPtr len >>= checkFreeResult
-          return $ Right items
+          freeResult <- c_free_simple_key_list arrPtr len
+          if freeResult /= 0
+            then return $ Left "Failed to free key list memory"
+            else return $ Right items
   where
     handleKeyItem arrPtr len ptr = do
       item <- peek ptr
-      key <- peekUtf8CString (keyWordPtr item)
+      key <- packKeyBytes (keyWordPtr item)
       return (key, recordStart item)
     
-    checkFreeResult rc = when (rc /= 0) $
-      throwIO $ userError "Failed to free key list memory"
+    packKeyBytes :: CString -> IO BS.ByteString
+    packKeyBytes cstr = do
+      len <- c_strlen cstr
+      BSI.create (fromIntegral len) $ \p -> 
+        BSI.memcpy p (castPtr cstr) (fromIntegral len)
 
--- Suggestion handling with error checking
-suggestWords :: MDict -> String -> Int -> IO (Either String [String])
+-- Safe suggestion handling
+suggestWords :: MDict -> String -> Int -> IO (Either String [BS.ByteString])
 suggestWords (MDict fptr) word maxSuggestions =
   withForeignPtr fptr $ \ptr ->
     withCString word $ \cword ->
@@ -146,8 +146,19 @@ suggestWords (MDict fptr) word maxSuggestions =
               then return $ Right []
               else do
                 suggestionPtrs <- peekArray maxSuggestions suggestionsPtr
-                suggestions <- mapM peekUtf8CString suggestionPtrs
-                return $ Right suggestions
+                results <- traverse readSuggestion suggestionPtrs
+                return $ sequence results
+  where
+    readSuggestion :: Ptr CChar -> IO (Either String BS.ByteString)
+    readSuggestion ptr = do
+      if ptr == nullPtr
+        then return $ Left "Null suggestion pointer"
+        else do
+          len <- c_strlen ptr
+          bs <- BSI.create (fromIntegral len) $ \p -> 
+            BSI.memcpy p (castPtr ptr) (fromIntegral len)
+          return $ Right bs
+
 
 -- File type detection
 getFileType :: MDict -> IO (Either String MDictType)
@@ -159,10 +170,21 @@ getFileType (MDict fptr) =
       1 -> Right MDD
       _ -> Left "Unknown file type"
 
--- UTF-8 decoding with error recovery
-peekUtf8CString :: CString -> IO String
-peekUtf8CString cstr = do
-  bs <- BS.packCString cstr
-  case decodeUtf8' bs of
-    Left _ -> return "<invalid utf-8>"
-    Right text -> return $ unpack text
+-- Helper for C string length
+foreign import ccall unsafe "string.h strlen"
+  c_strlen :: CString -> IO CSize
+
+-- Formatted list output
+listAllKeys :: MDict -> IO String
+listAllKeys dict = do
+  result <- getKeys dict
+  case result of
+    Left err -> return $ "Error: " ++ err
+    Right keys -> return $ formatKeys keys
+  where
+    formatKeys :: [KeyEntry] -> String
+    formatKeys entries = intercalate "\n" $ map formatEntry entries
+    
+    formatEntry :: KeyEntry -> String
+    formatEntry (bs, offset) =
+      BSC.unpack (BSC.take 50 bs) ++ "... (" ++ show offset ++ ")"
