@@ -2,6 +2,7 @@
 
 module MDict (
   MDict,
+  isMDDFile,
   MDictType(..),
   withMDict,
   lookupWord,
@@ -9,6 +10,8 @@ module MDict (
   parseDefinition,
   getKeys,
   getFileType,
+  mimeDetect,
+  destroyDict,
   listAllKeys
 ) where
 
@@ -22,11 +25,14 @@ import Control.Exception (bracket, throwIO)
 import Control.Monad (when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
+import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BSC
 import Data.List (intercalate)
 import Data.Word (Word64)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Char (toLower)
+import System.FilePath (takeExtension)
 
 
 -- C-compatible struct
@@ -47,6 +53,10 @@ newtype MDict = MDict (ForeignPtr ())
 -- Dictionary type
 data MDictType = MDX | MDD deriving (Show, Eq, Enum)
 
+isMDDFile :: FilePath -> Bool
+isMDDFile path = map toLower (takeExtension path) == ".mdd"
+
+
 -- FFI imports
 foreign import ccall "mdict_init"         c_mdict_init :: CString -> IO (Ptr ())
 foreign import ccall "mdict_destory"      c_mdict_destroy :: Ptr () -> IO CInt
@@ -60,6 +70,33 @@ foreign import ccall "mdict_filetype"     c_mdict_filetype :: Ptr () -> IO CInt
 foreign import ccall "mdict_suggest"      c_mdict_suggest :: Ptr () -> CString -> Ptr (Ptr (Ptr CChar)) -> CInt -> IO ()
 foreign import ccall "mdict_stem"         c_mdict_stem :: Ptr () -> CString -> Ptr (Ptr (Ptr CChar)) -> CInt -> IO ()
 foreign import ccall unsafe "string.h strlen" c_strlen :: CString -> IO CSize
+
+foreign import ccall unsafe "c_mime_detect"
+  c_mime_detect :: CString -> IO CString
+
+-- Convert a Haskell String to CString, call the C function, get back a Haskell String
+mimeDetect :: String -> IO String
+mimeDetect filename =
+  withCString filename $ \cstr -> do
+    result <- c_mime_detect cstr
+    peekCString result
+
+
+-- Define a Haskell version of the enum
+data MDictEncoding = MDBase64 | MDHex
+
+-- Convert to CInt for FFI
+encodeToCInt :: MDictEncoding -> CInt
+encodeToCInt MDBase64 = 0
+encodeToCInt MDHex    = 1
+
+
+-- | Destroy a dictionary
+destroyDict :: MDict -> IO ()
+destroyDict (MDict fptr) = withForeignPtr fptr $ \ptr -> do
+  _ <- c_mdict_destroy ptr
+  return ()
+
 
 -- Cast finalizer to expected type for newForeignPtr
 castFinalizer :: FunPtr (Ptr () -> IO CInt) -> FinalizerPtr a
@@ -77,37 +114,48 @@ withMDict path action = withCString path $ \cpath ->
     action
 
 -- Lookup
--- | Lookup a word and return decoded UTF-8 Text
-lookupWord :: MDict -> String -> IO (Either String T.Text)
-lookupWord (MDict fptr) word =
+lookupWord :: MDict -> String -> String -> IO (Either String String)
+lookupWord (MDict fptr) dictFile word =
   withForeignPtr fptr $ \ptr ->
     withCString word $ \cword ->
       alloca $ \resultPtr -> do
-        c_mdict_lookup ptr cword resultPtr
+        let isMDD = isMDDFile dictFile
+        if not isMDD
+          then c_mdict_lookup ptr cword resultPtr
+          else c_mdict_locate ptr cword resultPtr 0  -- force base64
+
         result <- peek resultPtr
         if result == nullPtr
           then return $ Left "Word not found"
           else do
-            len <- c_strlen result
-            bs <- BSI.create (fromIntegral len) $ \p ->
-                    BSI.memcpy p (castPtr result) (fromIntegral len)
-            -- Decode as UTF-8
-            case TE.decodeUtf8' bs of
-              Left err  -> return $ Left ("UTF-8 decode error: " ++ show err)
-              Right txt -> return $ Right txt
+            str <- peekCString (castPtr result)
+            -- MIME detection can be applied here if desired
+            mime <- mimeDetect word
+            let finalStr =
+                  if mime /= "application/octet-stream"
+                    then "data:" ++ mime ++ ";base64," ++ str
+                    else str
+            return $ Right finalStr
+
+
 
 -- Locate
-locateWord :: MDict -> String -> Int -> IO (Either String BS.ByteString)
-locateWord (MDict fptr) word enc = withForeignPtr fptr $ \ptr ->
-  withCString word $ \cword ->
-    alloca $ \resultPtr -> do
-      c_mdict_locate ptr cword resultPtr (fromIntegral enc)
-      result <- peek resultPtr
-      if result == nullPtr then return $ Left "Word not found"
-      else do
-        len <- c_strlen result
-        bs <- BSI.create (fromIntegral len) $ \p -> BSI.memcpy p (castPtr result) (fromIntegral len)
-        return $ Right bs
+locateWord :: MDict -> String -> Bool -> IO (Either String BS.ByteString)
+locateWord (MDict fptr) word hexOutput = 
+  withForeignPtr fptr $ \ptr ->
+    withCString word $ \cword ->
+      alloca $ \resultPtr -> do
+        let enc = if hexOutput then 1 else 0  -- MDD_ENCODING_HEX or BASE64
+        c_mdict_locate ptr cword resultPtr (fromIntegral enc)
+        result <- peek resultPtr
+        if result == nullPtr
+          then return $ Left "No result"
+          else do
+            len <- c_strlen result
+            bs <- BSI.create (fromIntegral len) $ \p ->
+              BSI.memcpy p (castPtr result) (fromIntegral len)
+            return $ Right bs
+
 
 -- Parse definition
 parseDefinition :: MDict -> String -> Word64 -> IO (Either String BS.ByteString)

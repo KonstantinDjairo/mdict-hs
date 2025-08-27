@@ -1,21 +1,26 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-
+import Control.Monad (when)
 import System.Environment (getArgs)
-import qualified Data.Text.IO as TIO
-import qualified MDict as M
+import System.Exit (exitFailure)
+
+import MDict
+
 
 
 main :: IO ()
 main = do
   args <- getArgs
-  case args of
-    [dictPath, word] -> 
-      M.withMDict dictPath $ \dict -> do
-        result <- M.lookupWord dict word
-        case result of
-          Left err -> putStrLn $ "Error: " ++ err
-          Right txt -> do
-            putStrLn "Definition:"
-            TIO.putStrLn txt
-    _ -> putStrLn "Usage: my_program <dictionary.mdx> <word>"
+  when (length args < 2) $ do
+    putStrLn "Usage: Main <dictionary_file> <query_key>"
+    exitFailure
+
+  let dictFile = args !! 0
+      queryKey = args !! 1
+
+  withMDict dictFile $ \dict -> do
+    result <- lookupWord dict dictFile queryKey
+    either putStrLn putStrLn result
+
+
+
