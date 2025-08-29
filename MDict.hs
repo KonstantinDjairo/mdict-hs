@@ -1,4 +1,6 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE OverloadedStrings #-}
+
 
 module MDict (
   MDict,
@@ -12,7 +14,8 @@ module MDict (
   getFileType,
   mimeDetect,
   destroyDict,
-  listAllKeys
+  listAllKeys,
+  replaceMedia
 ) where
 
 import Foreign
@@ -22,7 +25,6 @@ import Foreign.C.Types
 import Foreign.Ptr (Ptr, FunPtr, nullPtr, castFunPtr)
 import Foreign.ForeignPtr (ForeignPtr, newForeignPtr, withForeignPtr)
 import Control.Exception (bracket, throwIO)
-import Control.Monad (when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Base64 as B64
@@ -33,6 +35,12 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Char (toLower)
 import System.FilePath (takeExtension)
+import Text.HTML.Scalpel
+import Data.Maybe (fromMaybe)
+import Data.List (isInfixOf)
+import Control.Monad
+import System.FilePath (replaceExtension)
+
 
 
 -- C-compatible struct
@@ -208,3 +216,48 @@ listAllKeys dict = do
   case ekeys of
     Left err -> return $ "Error: " ++ err
     Right keys -> return $ unlines [BSC.unpack (BSC.take 50 bs) ++ "... (" ++ show off ++ ")" | (bs, off) <- keys]
+
+-- Media related functions:
+
+-- | Replace all local <img> sources with base64 content from .mdd
+replaceMedia :: FilePath -> String -> IO String
+replaceMedia mdxFile html = do
+    let urlsRaw = scrapeStringLike html $ chroots "img" $ attr "src" anySelector
+        urls = fromMaybe [] urlsRaw
+        localPaths = filter (not . isInfixOf "://") urls
+        mddFile = replaceExtension mdxFile ".mdd"
+    foldM (replaceOne mddFile) html localPaths
+
+-- | Replace a single <img> src with base64 content
+replaceOne :: FilePath -> String -> String -> IO String
+replaceOne mddFile html orig = do
+    let lookupQuery = "\\" ++ map slashToBack orig
+    base64 <- lookupMedia mddFile lookupQuery
+    return $ replaceSrc orig base64 html
+
+-- | Helper: convert '/' to '\'
+slashToBack :: Char -> Char
+slashToBack '/' = '\\'
+slashToBack c   = c
+
+-- | Replace the original src attribute with the base64 string
+replaceSrc :: String -> String -> String -> String
+replaceSrc orig base64 html =
+    T.unpack $ T.replace (T.pack $ "src=\"" ++ orig ++ "\"")
+                         (T.pack $ "src=\"" ++ base64 ++ "\"")
+                         (T.pack html)
+
+
+-- | Lookup the actual media in a .mdd using your MDict bindings
+lookupMedia :: FilePath -> String -> IO String
+lookupMedia mddFile query = do
+    -- Open the MDD dictionary
+    withMDict mddFile $ \mdd -> do
+        result <- lookupWord mdd mddFile query
+        case result of
+            Left err -> do
+                putStrLn $ "ERROR: " ++ err
+                return ""  -- leave empty if missing
+            Right base64 -> do
+              --  putStrLn $ "DEBUG: Found media for " ++ query
+                return base64
