@@ -3,7 +3,8 @@ name: Mirror mdict-hs
 
 permissions:
   contents: write
-
+  workflows: write 
+  
 on:
   schedule:
     - cron: '*/30 * * * *'  # every 30 minutes
