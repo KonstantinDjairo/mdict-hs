@@ -1,3 +1,4 @@
+-- Copyright © 2025 Hashirama Senju
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE OverloadedStrings #-}
 
