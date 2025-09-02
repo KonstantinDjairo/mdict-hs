@@ -1,0 +1,40 @@
+# .github/workflows/mirror.yml
+name: Mirror mdict-hs
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # every 30 minutes
+  workflow_dispatch:          # manual trigger
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare mirror
+        run: |
+          mkdir -p mirror
+          cd mirror
+          if [ ! -d "mdict-hs.git" ]; then
+            # Clone upstream as bare mirror if first run
+            git clone --mirror https://git.ajattix.org/hashirama/mdict-hs mdict-hs.git
+          else
+            cd mdict-hs.git
+            git remote set-url origin https://git.ajattix.org/hashirama/mdict-hs
+            git fetch --prune
+          fi
+
+      - name: Push mirror to GitHub
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd mirror/mdict-hs.git
+          git remote set-url origin https://x-access-token:$TOKEN@github.com/${{ github.repository }}.git
+          git push --mirror origin
