@@ -2,8 +2,7 @@
 name: Mirror mdict-hs
 
 permissions:
-  contents: write
-  workflows: write 
+  contents: write 
   
 on:
   schedule:
