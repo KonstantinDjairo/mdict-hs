@@ -34,7 +34,7 @@ jobs:
 
       - name: Push mirror to GitHub
         env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
         run: |
           cd mirror/mdict-hs.git
           git remote set-url origin https://x-access-token:$TOKEN@github.com/${{ github.repository }}.git
