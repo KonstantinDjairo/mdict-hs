@@ -1,7 +1,6 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-
 module MDict (
   MDict,
   isMDDFile,
