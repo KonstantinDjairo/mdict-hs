@@ -11,23 +11,15 @@ import System.FilePath (replaceExtension)
 import MDict
 
 
-
 main :: IO ()
 main = do
     args <- getArgs
     when (length args < 2) $ do
-        putStrLn "Usage: Main <dictionary_file> <query_key>"
+        putStrLn "Usage: Main <dictionary_dir> <query_key>"
         exitFailure
 
-    let dictFile = args !! 0
+    let dictDir  = args !! 0
         queryKey = args !! 1
 
-    withMDict dictFile $ \dict -> do
-        -- Lookup the main query
-        result <- lookupWord dict dictFile queryKey
-        case result of
-            Left err -> putStrLn err
-            Right html -> do
-                -- Replace all local <img> sources with base64 from .mdd
-                htmlWithMedia <- replaceMedia dictFile html
-                putStrLn htmlWithMedia
+    -- Process all files (lookupInCollection lists files itself)
+    lookupInCollection dictDir queryKey

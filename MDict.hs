@@ -15,7 +15,8 @@ module MDict (
   mimeDetect,
   destroyDict,
   listAllKeys,
-  replaceMedia
+  replaceMedia,
+  lookupInCollection
 ) where
 
 import Foreign
@@ -40,8 +41,8 @@ import Data.Maybe (fromMaybe)
 import Data.List (isInfixOf)
 import Control.Monad
 import System.FilePath (replaceExtension)
-
-
+import Control.DeepSeq (NFData, deepseq)
+import Wazahs
 
 -- C-compatible struct
 data SimpleKeyItem = SimpleKeyItem
@@ -70,6 +71,7 @@ foreign import ccall "mdict_init"         c_mdict_init :: CString -> IO (Ptr ())
 foreign import ccall "mdict_destory"      c_mdict_destroy :: Ptr () -> IO CInt
 foreign import ccall "&mdict_destory"     raw_mdict_destroy_finalizer :: FunPtr (Ptr () -> IO CInt)
 foreign import ccall "mdict_lookup"       c_mdict_lookup :: Ptr () -> CString -> Ptr (Ptr CChar) -> IO ()
+foreign import ccall "mdict_atomic_lookup"  c_mdict_atomic_lookup :: CString -> CString -> IO CString
 foreign import ccall "mdict_locate"       c_mdict_locate :: Ptr () -> CString -> Ptr (Ptr CChar) -> CInt -> IO ()
 foreign import ccall "mdict_parse_definition" c_mdict_parse_definition :: Ptr () -> CString -> Word64 -> Ptr (Ptr CChar) -> IO ()
 foreign import ccall "mdict_keylist"      c_mdict_keylist :: Ptr () -> Ptr Word64 -> IO (Ptr (Ptr SimpleKeyItem))
@@ -111,15 +113,27 @@ castFinalizer :: FunPtr (Ptr () -> IO CInt) -> FinalizerPtr a
 castFinalizer = castFunPtr
 
 -- Safe dictionary initialization
-withMDict :: FilePath -> (MDict -> IO a) -> IO a
-withMDict path action = withCString path $ \cpath ->
-  bracket
-    (do rawPtr <- c_mdict_init cpath
-        when (rawPtr == nullPtr) $ throwIO (userError "Failed to initialize MDict")
-        fp <- newForeignPtr (castFinalizer raw_mdict_destroy_finalizer) rawPtr
-        return (MDict fp))
-    (\_ -> return ())  -- ForeignPtr handles cleanup
-    action
+withMDict :: NFData a => FilePath -> (MDict -> IO a) -> IO a
+withMDict path action = withCString path $ \cpath -> do
+    rawPtr <- c_mdict_init cpath
+    when (rawPtr == nullPtr) $
+        throwIO (userError "Failed to initialize MDict")
+
+    fp <- newForeignPtr (castFinalizer raw_mdict_destroy_finalizer) rawPtr
+    let dict = MDict fp
+
+    result <- action dict
+    result `deepseq` return result
+
+lookupWordAtomic :: FilePath -> String -> IO String
+lookupWordAtomic dictFile key =
+  withCString dictFile $ \cfile ->
+  withCString key $ \ckey -> do
+      cstr <- c_mdict_atomic_lookup cfile ckey
+      result <- peekCString cstr
+      free cstr
+      return result
+
 
 -- Lookup
 lookupWord :: MDict -> String -> String -> IO (Either String String)
@@ -261,3 +275,24 @@ lookupMedia mddFile query = do
             Right base64 -> do
               --  putStrLn $ "DEBUG: Found media for " ++ query
                 return base64
+
+
+processDictionary :: FilePath -> String -> IO (Either String String)
+processDictionary dictFile queryKey =
+    withMDict dictFile $ \dict -> do
+        result <- lookupWord dict dictFile queryKey
+        case result of
+            Left err -> return (Left err)
+            Right html -> do
+                htmlWithMedia <- replaceMedia dictFile html
+                return (Right htmlWithMedia)
+
+-- | fmap it over a collection of dictionaries
+lookupInCollection :: FilePath -> String -> IO ()
+lookupInCollection dir queryKey = do
+    files <- listFiles dir
+    forM_ files $ \file -> do
+        putStrLn $ "Processing: " ++ file
+        html <- lookupWordAtomic file queryKey -- needs to combine with replaceMedia
+        putStrLn html
+        putStrLn "-----"
