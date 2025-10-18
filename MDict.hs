@@ -16,7 +16,8 @@ module MDict (
   destroyDict,
   listAllKeys,
   replaceMedia,
-  lookupInCollection
+  lookupInCollection,
+  processDictionary
 ) where
 
 import Foreign
@@ -30,7 +31,6 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BSC
-import Data.List (intercalate)
 import Data.Word (Word64)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -38,7 +38,10 @@ import Data.Char (toLower)
 import System.FilePath (takeExtension)
 import Text.HTML.Scalpel
 import Data.Maybe (fromMaybe)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, intercalate)
+import Data.List.Split (splitOn)
+import System.Directory (doesFileExist)
+import System.FilePath ((</>), takeDirectory)
 import Control.Monad
 import System.FilePath (replaceExtension)
 import Control.DeepSeq (NFData, deepseq)
@@ -223,24 +226,58 @@ getFileType (MDict fptr) = withForeignPtr fptr $ \ptr -> do
     1 -> Right MDD
     _ -> Left "Unknown file type"
 
--- List all keys
+-- List all keys (stdout)
 listAllKeys :: MDict -> IO String
 listAllKeys dict = do
   ekeys <- getKeys dict
   case ekeys of
     Left err -> return $ "Error: " ++ err
-    Right keys -> return $ unlines [BSC.unpack (BSC.take 50 bs) ++ "... (" ++ show off ++ ")" | (bs, off) <- keys]
+    Right keys -> return $ unlines [BSC.unpack bs | (bs, _) <- keys]
+
 
 -- Media related functions:
 
 -- | Replace all local <img> sources with base64 content from .mdd
 replaceMedia :: FilePath -> String -> IO String
 replaceMedia mdxFile html = do
+    let mddFile = replaceExtension mdxFile ".mdd"
+        mdxDir  = takeDirectory mdxFile
+
+    -- Phase 1: Replace <img src="..."> media
     let urlsRaw = scrapeStringLike html $ chroots "img" $ attr "src" anySelector
         urls = fromMaybe [] urlsRaw
         localPaths = filter (not . isInfixOf "://") urls
-        mddFile = replaceExtension mdxFile ".mdd"
-    foldM (replaceOne mddFile) html localPaths
+    html' <- foldM (replaceOne mddFile) html localPaths
+
+    -- Phase 2: Handle CSS
+    let cssRaw = scrapeStringLike html' $ chroots "link" $ do
+            rel  <- attr "rel" anySelector
+            href <- attr "href" anySelector
+            if rel == "stylesheet" then return href else fail "not css"
+        cssFiles = fromMaybe [] cssRaw
+        localCssFiles = filter (not . isInfixOf "://") cssFiles
+
+    -- Lookup each CSS in the dictionary or read from local file
+    cssBlocks <- mapM (\css -> do
+                          let localPath = mdxDir </> css
+                          exists <- doesFileExist localPath
+                          if exists
+                             then readFile localPath
+                             else lookupMedia mddFile css
+                      ) localCssFiles
+
+    let cssTag = concatMap (\c -> if null c then "" else "<style>" ++ c ++ "</style>") cssBlocks
+
+    -- Inject all CSS into <head> if exists, otherwise prepend
+    let maybeHead = scrapeStringLike html' (chroot "head" (return ()))
+        htmlWithCss =
+            if maybeHead /= Nothing
+               then intercalate ("<head>" ++ cssTag) (splitOn "<head>" html')
+               else cssTag ++ html'
+
+    return htmlWithCss
+
+
 
 -- | Replace a single <img> src with base64 content
 replaceOne :: FilePath -> String -> String -> IO String
@@ -296,3 +333,4 @@ lookupInCollection dir queryKey = do
         html <- lookupWordAtomic file queryKey -- needs to combine with replaceMedia
         putStrLn html
         putStrLn "-----"
+
